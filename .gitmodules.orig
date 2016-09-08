@@ -7,7 +7,10 @@
 [submodule "android/ftc_app"]
 	path = android/ftc_app
 	url = https://github.com/ftctechnh/ftc_app.git
-	branch = beta
+<<<<<<< HEAD
 [submodule "navX-Python"]
 	path = navX-Python
 	url = https://github.com/utk-robotics-2017/navX-Python.git
+=======
+	branch = beta
+>>>>>>> 5303b8da242022e04fc48ba44ffb6235db24f1d6

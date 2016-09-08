@@ -60,7 +60,7 @@ uint8_t i2c3_RxBuffer[RXBUFFERSIZE];
 uint8_t spi1_RxBuffer[RXBUFFERSIZE];
 
 #define MIN_SAMPLE_RATE_HZ 4
-#define MAX_SAMPLE_RATE_HZ 60
+#define MAX_SAMPLE_RATE_HZ 200
 
 #define UART_RX_PACKET_TIMEOUT_MS 	30 /* Max wait after start of packet */
 #define MIN_UART_MESSAGE_LENGTH		STREAM_CMD_MESSAGE_LENGTH
@@ -282,7 +282,8 @@ uint16_t get_capability_flags()
     uint16_t capability_flags = 0;
     capability_flags |= (NAVX_CAPABILITY_FLAG_OMNIMOUNT +
             NAVX_CAPABILITY_FLAG_VEL_AND_DISP +
-            NAVX_CAPABILITY_FLAG_YAW_RESET);
+            NAVX_CAPABILITY_FLAG_YAW_RESET +
+            NAVX_CAPABILITY_FLAG_AHRSPOS_TS);
     uint16_t yaw_axis_info =
             (((struct flash_cal_data *)flashdata)->orientationdata.yaw_axis << 1) +
             ((((struct flash_cal_data *)flashdata)->orientationdata.yaw_axis_up) ? 1 : 0);
@@ -607,7 +608,7 @@ bool sample_rate_update = true;
 uint8_t new_sample_rate = 0;
 /* Signal that integration control has been updated by remote user */
 bool integration_control_update = true;
-uint8_t new_integration_control = 0;
+volatile uint8_t new_integration_control = 0;
 uint32_t i2c_bus_reset_count = 0;
 uint32_t i2c_interrupt_reset_count = 0;
 
@@ -640,7 +641,9 @@ _EXTERN_ATTRIB void nav10_main()
         int32_t integration_control_parameter = 0;
         int num_update_bytes[2] = { 0, 0 };
         int num_resp_bytes[2] = { 0, 0 };
+
         periodic_compass_update();
+
         if ( sample_rate_update ) {
             if ( new_sample_rate != 0 ) {
                 mpu_set_new_sample_rate(new_sample_rate);
@@ -652,14 +655,31 @@ _EXTERN_ATTRIB void nav10_main()
             send_stream_response[0] = true;
             send_stream_response[1] = true;
         }
+
         if ( integration_control_update ) {
-            reset_velocity_and_dispacement_integrator(&mpudata,new_integration_control);
-            if ( new_integration_control & 0x80 ) {
+
+        	/* Read/Modify/Write integration control register */
+			NVIC_DisableIRQ((IRQn_Type)I2C3_EV_IRQn);
+			NVIC_DisableIRQ((IRQn_Type)SPI1_IRQn);
+			integration_control_update = false;
+			uint8_t curr_vel_disp_int_control = new_integration_control & NAVX_INTEGRATION_CTL_VEL_AND_DISP_MASK;
+			uint8_t curr_yaw_int_control = new_integration_control & NAVX_INTEGRATION_CTL_RESET_YAW;
+			new_integration_control &= ~(curr_vel_disp_int_control | curr_yaw_int_control);
+			NVIC_EnableIRQ((IRQn_Type)SPI1_IRQn);
+			NVIC_EnableIRQ((IRQn_Type)I2C3_EV_IRQn);
+
+        	if ( curr_vel_disp_int_control != 0 ) {
+        		reset_velocity_and_dispacement_integrator(&mpudata,curr_vel_disp_int_control);
+        	}
+
+            if ( curr_yaw_int_control != 0 ) {
                 if ( yaw_offset_calibration_complete ) {
                     /* Current yaw angle now becomes zero degrees */
                     float curr_yaw_offset;
                     /* Disable MPU interrupts around the following
-                     * pair of calls to get_yaw_offset() and set_yaw_offset().
+                     * pair of calls to get_yaw_offset() and set_yaw_offset(),
+                     * while changing the yaw offset (which is used in the
+                     * interrupt handler).
                      */
                     HAL_NVIC_DisableIRQ((IRQn_Type)EXTI9_5_IRQn);
                     get_yaw_offset(&curr_yaw_offset);
@@ -675,7 +695,6 @@ _EXTERN_ATTRIB void nav10_main()
                     HAL_NVIC_EnableIRQ((IRQn_Type)EXTI9_5_IRQn);
                 }
             }
-            integration_control_update = false;
         }
 
         if ( schedule_caldata_clear && ( caldata_clear_count < 3 ) ) {
@@ -781,7 +800,36 @@ _EXTERN_ATTRIB void nav10_main()
 
                 for ( int ifx = 0; ifx < num_serial_interfaces; ifx++ ) {
 
-                    if ( update_type[ifx] == MSGID_AHRSPOS_UPDATE ) {
+                    if ( update_type[ifx] == MSGID_AHRSPOS_TS_UPDATE ) {
+
+                        num_update_bytes[ifx] = AHRSProtocol::encodeAHRSPosTSUpdate( update_buffer[ifx],
+                                mpudata.yaw,
+                                mpudata.pitch,
+                                mpudata.roll,
+                                mpudata.heading,
+                                0.0, 							/* TODO:  Calc altitude    */
+                                mpudata.fused_heading,
+                                mpudata.world_linear_accel[0],
+                                mpudata.world_linear_accel[1],
+                                mpudata.world_linear_accel[2],
+                                mpudata.temp_c,
+                                (((float)mpudata.quaternion[0])/65536), /* Cvt 16:16 -> Float */
+                                (((float)mpudata.quaternion[1])/65536), /* Cvt 16:16 -> Float */
+                                (((float)mpudata.quaternion[2])/65536), /* Cvt 16:16 -> Float */
+                                (((float)mpudata.quaternion[3])/65536), /* Cvt 16:16 -> Float */
+                                mpudata.velocity[0],
+                                mpudata.velocity[1],
+                                mpudata.velocity[2],
+                                mpudata.displacement[0],
+                                mpudata.displacement[1],
+                                mpudata.displacement[2],
+                                registers.op_status,
+                                registers.sensor_status,
+                                registers.cal_status,
+                                registers.selftest_status,
+                                registers.timestamp);
+                    }
+                    else if ( update_type[ifx] == MSGID_AHRSPOS_UPDATE ) {
 
                         num_update_bytes[ifx] = AHRSProtocol::encodeAHRSPosUpdate( update_buffer[ifx],
                                 mpudata.yaw,
@@ -1166,7 +1214,8 @@ _EXTERN_ATTRIB void nav10_main()
                                 ( new_stream_type == MSGID_QUATERNION_UPDATE ) ||
                                 ( new_stream_type == MSGID_GYRO_UPDATE ) ||
                                 ( new_stream_type == MSGID_AHRS_UPDATE ) ||
-                                ( new_stream_type == MSGID_AHRSPOS_UPDATE ) ) {
+                                ( new_stream_type == MSGID_AHRSPOS_UPDATE ) ||
+                                ( new_stream_type == MSGID_AHRSPOS_TS_UPDATE )) {
                             update_type[ifx] = new_stream_type;
                         }
                     }
@@ -1204,8 +1253,8 @@ _EXTERN_ATTRIB void nav10_main()
                             &inbound_data[i], bytes_remaining,
                             integration_control_action, integration_control_parameter ) ) ) {
                         send_integration_control_response[ifx] = true;
+                        new_integration_control |= integration_control_action;
                         integration_control_update = true;
-                        new_integration_control = integration_control_action;
                     }
                     if ( packet_length > 0 ) {
                         i += packet_length;
@@ -1411,8 +1460,10 @@ void process_writable_register_update( uint8_t requested_address, uint8_t *reg_a
         new_sample_rate = *reg_addr;
         sample_rate_update = true;
     } else if ( requested_address == NAVX_REG_INTEGRATION_CTL) {
-        /* This is a write-only register */
-        new_integration_control = value;
+        /* This is a write-only register                        */
+    	/* Thus, only setting of bits is allowed here (clearing */
+    	/* of bits is performed in the foreground).             */
+        new_integration_control |= value;
         integration_control_update = true;
     }
 }
