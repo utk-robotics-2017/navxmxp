@@ -57,6 +57,13 @@ class Robot: public SampleRobot, public PIDOutput
     double rotateToAngleRate;           // Current rotation rate
 
 public:
+
+    /* This function is invoked periodically by the PID Controller, */
+    /* based upon navX MXP yaw angle input and PID Coefficients.    */
+    virtual void PIDWrite(double output) {
+        this->rotateToAngleRate = output;
+    }
+
 	Robot() :
             robotDrive(frontLeftChannel, rearLeftChannel,
                        frontRightChannel, rearRightChannel), // initialize variables in same
@@ -67,11 +74,19 @@ public:
         robotDrive.SetInvertedMotor(RobotDrive::kFrontLeftMotor, true);	// invert left side motors
         robotDrive.SetInvertedMotor(RobotDrive::kRearLeftMotor, true);	// change to match your robot
         try {
-            /* Communicate w/navX MXP via the MXP SPI Bus.                                       */
-            /* Alternatively:  I2C::Port::kMXP, SerialPort::Port::kMXP or SerialPort::Port::kUSB */
-            /* See http://navx-mxp.kauailabs.com/guidance/selecting-an-interface/ for details.   */
+			/***********************************************************************
+			 * navX-MXP:
+			 * - Communication via RoboRIO MXP (SPI, I2C, TTL UART) and USB.
+			 * - See http://navx-mxp.kauailabs.com/guidance/selecting-an-interface.
+			 *
+			 * navX-Micro:
+			 * - Communication via I2C (RoboRIO MXP or Onboard) and USB.
+			 * - See http://navx-micro.kauailabs.com/guidance/selecting-an-interface.
+			 *
+			 * Multiple navX-model devices on a single robot are supported.
+			 ************************************************************************/
             ahrs = new AHRS(SPI::Port::kMXP);
-        } catch (std::exception ex ) {
+        } catch (std::exception& ex ) {
             std::string err_string = "Error instantiating navX MXP:  ";
             err_string += ex.what();
             DriverStation::ReportError(err_string.c_str());
@@ -132,18 +147,13 @@ public:
                 /* depending upon whether "rotate to angle" is active.    */
                 robotDrive.MecanumDrive_Cartesian(stick.GetX(), stick.GetY(),
                                                   currentRotationRate ,ahrs->GetAngle());
-            } catch (std::exception ex ) {
+            } catch (std::exception& ex ) {
                 std::string err_string = "Error communicating with Drive System:  ";
                 err_string += ex.what();
                 DriverStation::ReportError(err_string.c_str());
             }
             Wait(0.005); // wait 5ms to avoid hogging CPU cycles
         }
-    }
-    /* This function is invoked periodically by the PID Controller, */
-    /* based upon navX MXP yaw angle input and PID Coefficients.    */
-    void PIDWrite(float output) {
-        rotateToAngleRate = output;
     }
 };
 

@@ -40,9 +40,13 @@ class SerialIO implements IIOProvider {
     double last_valid_packet_time;
 
     final boolean debug = false; /* Set to true to enable debug output (to smart dashboard) */
+    boolean is_usb;
     
     public SerialIO( SerialPort.Port port_id, byte update_rate_hz, boolean processed_data, IIOCompleteNotification notify_sink, IBoardCapabilities board_capabilities ) {
         this.serial_port_id = port_id;
+        is_usb = ((port_id == SerialPort.Port.kUSB) ||
+        		  (port_id == SerialPort.Port.kUSB1)||
+        		  (port_id == SerialPort.Port.kUSB2));
         ypr_update_data = new IMUProtocol.YPRUpdate();
         gyro_update_data = new IMUProtocol.GyroUpdate();
         ahrs_update_data = new AHRSProtocol.AHRSUpdate();
@@ -134,7 +138,7 @@ class SerialIO implements IIOProvider {
         if ( (packet_length = IMUProtocol.decodeYPRUpdate(received_data, offset, bytes_remaining, ypr_update_data)) > 0) {
             notify_sink.setYawPitchRoll(ypr_update_data, sensor_timestamp);
         } else if ( ( packet_length = AHRSProtocol.decodeAHRSPosTSUpdate(received_data, offset, bytes_remaining, ahrspos_ts_update_data)) > 0) {
-            notify_sink.setAHRSPosData(ahrspos_update_data, ahrspos_ts_update_data.timestamp);
+            notify_sink.setAHRSPosData(ahrspos_ts_update_data, ahrspos_ts_update_data.timestamp);
         } else if ( ( packet_length = AHRSProtocol.decodeAHRSPosUpdate(received_data, offset, bytes_remaining, ahrspos_update_data)) > 0) {
             notify_sink.setAHRSPosData(ahrspos_update_data, sensor_timestamp);
         } else if ( ( packet_length = AHRSProtocol.decodeAHRSUpdate(received_data, offset, bytes_remaining, ahrs_update_data)) > 0) {
@@ -148,7 +152,8 @@ class SerialIO implements IIOProvider {
         }
         return packet_length;
     }    
-    
+
+    @SuppressWarnings("unused") /* The following variables are debug-only. */    
     public void run() {
 
         stop = false;
@@ -156,7 +161,7 @@ class SerialIO implements IIOProvider {
         double last_stream_command_sent_timestamp = 0.0;
         double last_data_received_timestamp = 0;
         double last_second_start_time = 0;
-
+               
         int partial_binary_packet_count = 0;
         int stream_response_receive_count = 0;
         int timeout_count = 0;
@@ -203,6 +208,12 @@ class SerialIO implements IIOProvider {
         while (!stop) {
             try {
 
+            	if( serial_port == null) {
+                    double update_rate = 1.0/((double)((int)(this.update_rate_hz & 0xFF)));
+            		Timer.delay(update_rate);
+            		resetSerialPort();
+            		continue;
+            	}
                 // Wait, with delays to conserve CPU resources, until
                 // bytes have arrived.
 
@@ -212,6 +223,11 @@ class SerialIO implements IIOProvider {
                     next_integration_control_action = 0;
                     cmd_packet_length = AHRSProtocol.encodeIntegrationControlCmd( integration_control_command, integration_control );
                     try {
+                    	/* Ugly Hack.  This is a workaround for ARTF5478:           */
+                    	/* (USB Serial Port Write hang if receive buffer not empty. */
+                    	if (is_usb) {
+                    		serial_port.reset();
+                    	}
                         serial_port.write( integration_control_command, cmd_packet_length );
                     } catch (RuntimeException ex2) {
                         ex2.printStackTrace();
@@ -219,7 +235,8 @@ class SerialIO implements IIOProvider {
                 }               
 
                 if ( !stop && ( remainder_bytes == 0 ) && ( serial_port.getBytesReceived() < 1 ) ) {
-                    Timer.delay(1.0/update_rate_hz);
+                    double update_rate = 1.0/((double)((int)(this.update_rate_hz & 0xFF)));
+                    Timer.delay(update_rate);
                 }
 
                 int packets_received = 0;
@@ -332,6 +349,9 @@ class SerialIO implements IIOProvider {
                                         SmartDashboard.putNumber("navX Integration Control Response Count", integration_response_receive_count);
                                     }
                                     i += packet_length;
+                                    if ((integration_control.action & AHRSProtocol.NAVX_INTEGRATION_CTL_RESET_YAW)!=0) {
+                                    	this.notify_sink.yawResetComplete();
+                                    }                    
                                 } else {
                                     /* Even though a start-of-packet indicator was found, the  */
                                     /* current index is not the start of a packet if interest. */
@@ -468,6 +488,11 @@ class SerialIO implements IIOProvider {
                         try {
                             resetSerialPort();
                             last_stream_command_sent_timestamp = Timer.getFPGATimestamp();
+                        	/* Ugly Hack.  This is a workaround for ARTF5478:           */
+                        	/* (USB Serial Port Write hang if receive buffer not empty. */
+                        	if (is_usb) {
+                        		serial_port.reset();
+                        	}                            
                             serial_port.write( stream_command, cmd_packet_length );
                             cmd_packet_length = AHRSProtocol.encodeDataGetRequest( stream_command,  AHRSProtocol.AHRS_DATA_TYPE.BOARD_IDENTITY, (byte)0 ); 
                             serial_port.write( stream_command, cmd_packet_length );
@@ -479,7 +504,8 @@ class SerialIO implements IIOProvider {
                     else {                        
                         // If no bytes remain in the buffer, and not awaiting a response, sleep a bit
                         if ( stream_response_received && ( serial_port.getBytesReceived() == 0 ) ) {
-                            Timer.delay(1.0/update_rate_hz);
+                            double update_rate = 1.0/((double)((int)(this.update_rate_hz & 0xFF)));      
+                        	Timer.delay(update_rate);
                         }        
                     }
 
@@ -570,5 +596,8 @@ class SerialIO implements IIOProvider {
         stop = true;
     }
     
+    @Override
+    public void enableLogging(boolean enable) {
+    }
     
 }
